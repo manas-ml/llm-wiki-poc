@@ -19,6 +19,16 @@ async function createTask(title: string) {
 }
 
 describe("tasks API", () => {
+  it("rejects requests without an API key", async () => {
+    const res = await request(app).get("/tasks");
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects creating a task without a title", async () => {
+    const res = await request(app).post("/tasks").set("x-api-key", API_KEY).send({});
+    expect(res.status).toBe(400);
+  });
+
   it("creates a task with defaults applied", async () => {
     const res = await request(app)
       .post("/tasks")
@@ -58,6 +68,33 @@ describe("tasks API", () => {
     expect(res.status).toBe(404);
   });
 
+  it("rejects assigning a nonexistent task", async () => {
+    const user = await createUser("Ada Lovelace", "ada.assign@example.com");
+
+    const res = await request(app)
+      .post("/tasks/ghost-task/assign")
+      .set("x-api-key", API_KEY)
+      .send({ assigneeId: user.id });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for an unknown task", async () => {
+    const res = await request(app).get("/tasks/ghost-task").set("x-api-key", API_KEY);
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects an invalid status value", async () => {
+    const task = await createTask("Fix the flaky test");
+
+    const res = await request(app)
+      .patch(`/tasks/${task.id}/status`)
+      .set("x-api-key", API_KEY)
+      .send({ status: "archived" });
+
+    expect(res.status).toBe(400);
+  });
+
   it("transitions task status", async () => {
     const task = await createTask("Fix the flaky test");
 
@@ -83,5 +120,24 @@ describe("tasks API", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.some((t: { id: string }) => t.id === task.id)).toBe(true);
+  });
+
+  it("filters tasks by assignee", async () => {
+    const user = await createUser("Margaret Hamilton", "margaret@example.com");
+    const assignedTask = await createTask("Write the guidance software");
+    await createTask("Unrelated task");
+
+    await request(app)
+      .post(`/tasks/${assignedTask.id}/assign`)
+      .set("x-api-key", API_KEY)
+      .send({ assigneeId: user.id });
+
+    const res = await request(app)
+      .get(`/tasks?assigneeId=${user.id}`)
+      .set("x-api-key", API_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].id).toBe(assignedTask.id);
   });
 });

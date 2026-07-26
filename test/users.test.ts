@@ -58,4 +58,16 @@ describe("users API", () => {
 
     expect(res.status).toBe(404);
   });
+
+  it("lists created users", async () => {
+    const createRes = await request(app)
+      .post("/users")
+      .set("x-api-key", API_KEY)
+      .send({ name: "Katherine Johnson", email: "katherine@example.com" });
+
+    const listRes = await request(app).get("/users").set("x-api-key", API_KEY);
+
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.some((u: { id: string }) => u.id === createRes.body.id)).toBe(true);
+  });
 });

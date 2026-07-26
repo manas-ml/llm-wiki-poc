@@ -38,7 +38,7 @@ src/                    TaskFlow API source (Express + TypeScript)
   modules/users/         Users: routes -> controller -> service -> repository
   modules/tasks/         Tasks: same layering, plus assignment + status transitions
   db/in-memory-store.ts  Swappable in-memory persistence
-test/                   vitest + supertest integration tests (10 tests)
+test/                   vitest + supertest integration tests (19 tests)
 openwiki/
   INSTRUCTIONS.md        User-authored brief that steers what OpenWiki documents
 scripts/
@@ -73,7 +73,7 @@ curl -s -X POST http://localhost:3000/users \
 Run the test suite:
 
 ```sh
-npm test        # 10 tests, vitest + supertest
+npm test        # 19 tests, vitest + supertest
 npm run typecheck
 npm run build
 ```
@@ -107,8 +107,9 @@ you to run with your own credentials:
 
 ```sh
 cp .env.example .env
-# edit .env: set OPENWIKI_PROVIDER and the matching API key
-# (see .env.example for Anthropic / OpenAI / OpenRouter options)
+# edit .env: set OPENROUTER_API_KEY
+# (defaults to OpenRouter running GLM-5.2 (z-ai/glm-5.2), the same model the
+# scheduled workflow uses; see .env.example for Anthropic / OpenAI alternatives)
 
 npm run wiki:update    # openwiki code --update
 # or, for the interactive chat/init flow:

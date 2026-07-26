@@ -134,6 +134,66 @@ variables → Actions**.
 This is the "real life" payoff: docs that update themselves as a PR for review, on the
 same cadence as your CI, instead of a wiki someone has to remember to edit.
 
+## How the OpenWiki agent actually works
+
+`openwiki code --update` isn't a template renderer — it's a sandboxed [DeepAgents](https://github.com/langchain-ai/deepagentsjs)
+agent (a LangGraph-native ReAct harness) run once against the repo. This is grounded in
+reading OpenWiki's own installed source (`node_modules/openwiki/dist/agent/*`), not just
+its docs:
+
+```
+CLI (openwiki code --update)
+  └─ resolves provider/model from env (Anthropic / OpenAI / Gemini / Bedrock / OpenRouter…)
+  └─ createDeepAgent({ model, tools, backend, middleware, systemPrompt })
+        ├─ backend   — virtual filesystem rooted at the repo, write-locked to /openwiki/**
+        ├─ tools     — write_todos, ls/glob/grep/read_file/write_file/edit_file, task, execute
+        ├─ middleware — OKF front-matter repair + Mermaid validation + index generation
+        └─ systemPrompt — the run's actual "spec" (see below)
+  └─ agent.streamEvents(...) runs the tool-call loop until it stops
+```
+
+**The backend sandboxes the blast radius.** `OpenWikiLocalShellBackend` can `read_file`
+anywhere in the repo, but every `write_file`/`edit_file` call is checked against the
+target path first — anything outside `/openwiki/` is refused outright
+(`agent/docs-only-backend.js`). That's what makes it safe to run unattended in CI.
+
+**The system prompt is the real spec**, not a one-liner — around 400 lines
+(`agent/prompt.js`), including:
+- *Run discipline* — targeted `grep`/`glob` over entrypoints, routes, and schema files;
+  explicitly told not to read every file
+- *Subagent discipline* — spawn 1–4 `task` subagents for large/unfamiliar repos to
+  research domains in parallel; subagents are read-only, only the main agent writes
+- *Planning discipline* — write a temporary `openwiki/_plan.md` with intended pages and
+  `source → relationship → target` links before writing final docs, then delete it
+- *OKF relationship modeling* — every wiki page is a "concept node"; every Markdown link
+  between pages is a typed relationship edge (`depends on`, `dispatches to`, …), so the
+  wiki is a knowledge graph, not a folder of files
+- *Diagram discipline* — embed a Mermaid `sequenceDiagram`/`stateDiagram-v2`/`erDiagram`/
+  `flowchart` wherever a runtime flow, lifecycle, or data model is clearer as a picture
+
+**Deterministic middleware cleans up after the LLM** (`agent/okf-middleware.js`), so the
+model doesn't have to be perfect: every write's YAML front matter is validated, with an
+actionable warning injected back into the tool result if it's malformed so the agent
+self-corrects on its next turn; after the run, every Mermaid fence is parsed and any that
+fail to validate are downgraded to plain text instead of breaking the page; and every
+directory's `index.md` is regenerated deterministically — the agent is explicitly told
+never to write those itself.
+
+**Worked example against this repo.** A real `openwiki code --update` run over TaskFlow
+would roughly: `write_todos` a plan (inspect `app.ts`, the `users`/`tasks` modules,
+middleware, `openwiki/INSTRUCTIONS.md`, recent git history) → targeted `read_file`/`grep`
+discovery (small repo, so no subagents needed) → write `openwiki/_plan.md` mapping
+`tasks.service.assignTask -> depends on -> usersService.getUser` and similar relationships
+→ write `openwiki/quickstart.md` plus a couple of section pages, including a Mermaid
+sequence diagram for `POST /tasks/:id/assign` tracing
+`route → controller → service → repository → store` → delete the plan file → hand off to
+the deterministic middleware for front-matter/diagram validation and index generation.
+
+It also has a cheap no-op path: before spending an LLM call, the CLI compares the current
+git `HEAD` against the last recorded run and skips the agent entirely if nothing changed
+(`agent/index.js`, `getUpdateNoopStatus`) — which is what keeps the daily CI cron cheap to
+run on quiet days.
+
 ## Requirements
 
 - Node.js >= 22 (OpenWiki's own requirement)

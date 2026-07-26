@@ -1,0 +1,35 @@
+{
+  "name": "taskflow-api",
+  "version": "1.0.0",
+  "description": "TaskFlow — a small task-management REST API used as a real-life sample project for demonstrating the OpenWiki documentation agent (https://github.com/langchain-ai/openwiki).",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "wiki:setup": "node scripts/init-openwiki.mjs",
+    "wiki": "openwiki code",
+    "wiki:init": "openwiki code --init",
+    "wiki:update": "openwiki code --update"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/supertest": "^6.0.2",
+    "openwiki": "^0.2.3",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

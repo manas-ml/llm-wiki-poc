@@ -43,10 +43,18 @@ openwiki/
   INSTRUCTIONS.md        User-authored brief that steers what OpenWiki documents
 scripts/
   init-openwiki.mjs      Scaffolds OpenWiki's repo files (see below)
+  check-openapi-sync.ts  Sensor for the openapi-sync agent loop (see below)
+openapi.json              OpenAPI spec, kept in sync with src/modules/** by the openapi-sync loop
 AGENTS.md, CLAUDE.md     Agent context files (OpenWiki-generated)
+.agents/skills/           Repo-local agent skills (symlinked into .claude/skills/)
+  expand-test-coverage/   Closes test gaps in test/**
+  openapi-sync/           Fixes drift between openapi.json and src/modules/**
+.github/agent-memory/     Standing feedback for each agent loop, carried between runs
 .github/workflows/
   openwiki-update.yml    Scheduled OpenWiki doc-update workflow (OpenWiki-generated)
   ci.yml                 Build/typecheck/test for the TaskFlow API itself
+  agent-expand-test-coverage.yml   Runs the expand-test-coverage loop
+  agent-openapi-sync.yml           Runs the openapi-sync loop
 ```
 
 ### Why a real app instead of a stub
@@ -194,6 +202,45 @@ It also has a cheap no-op path: before spending an LLM call, the CLI compares th
 git `HEAD` against the last recorded run and skips the agent entirely if nothing changed
 (`agent/index.js`, `getUpdateNoopStatus`) — which is what keeps the daily CI cron cheap to
 run on quiet days.
+
+## Agent control loops in this repo
+
+Beyond OpenWiki, this repo has two recurring coding-agent loops that keep a specific
+property of the codebase in sync automatically:
+
+- **`expand-test-coverage`** (`.agents/skills/expand-test-coverage/`,
+  `.github/workflows/agent-expand-test-coverage.yml`) — closes gaps between
+  `src/modules/**` and `test/*.test.ts` in small, reviewable batches.
+- **`openapi-sync`** (`.agents/skills/openapi-sync/`,
+  `.github/workflows/agent-openapi-sync.yml`) — keeps `openapi.json` in sync with the
+  live Express routes and Zod schemas, using `scripts/check-openapi-sync.ts` as a
+  standalone drift sensor.
+
+Both follow the same shape: a repo-local skill defines the agent's judgement, a GitHub
+Actions workflow runs the agent (manual dispatch, plus `/iterate` on its PRs), and a
+`.github/agent-memory/<name>.md` file carries standing feedback between runs, bounded to
+one open PR per loop.
+
+They were built with two different Claude Code skills, which solve different parts of
+the "turn a repeatable task into automation" problem:
+
+- **`build-iterated-agentic-loop`** — use when the task is already well-defined and
+  repeatable: you know how the agent will find issues (an existing tool, a known diff, a
+  known pattern) and just need it turned into a skill + workflow + memory file. There's
+  no separate measurement step — the agent finds and fixes in one pass.
+  `expand-test-coverage` was built this way.
+- **`design-control-loop`** — use when there isn't yet a repeatable way to measure the
+  gap, or the loop needs its own standalone tooling. It frames the task as
+  set point → sensor → controller → actuator, and requires the sensor/controller to be
+  built and verified as version-controlled scripts *before* any agent is wired to them.
+  `openapi-sync` needed this because `check-openapi-sync.ts` had to reliably detect
+  drift on its own before an agent could be trusted to act on its output. It also covers
+  dampeners/regression gates, which `build-iterated-agentic-loop` doesn't.
+
+Rule of thumb: if you can already say "the agent runs `<tool>` and fixes what it
+reports," reach for `build-iterated-agentic-loop`. If the answer to "how do we know
+there's a gap" doesn't exist yet, use `design-control-loop` to build that measurement
+first.
 
 ## Requirements
 

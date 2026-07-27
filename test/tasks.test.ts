@@ -95,6 +95,16 @@ describe("tasks API", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 404 when updating the status of a nonexistent task", async () => {
+    const res = await request(app)
+      .patch("/tasks/ghost-task/status")
+      .set("x-api-key", API_KEY)
+      .send({ status: "done" });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "Task not found: ghost-task" });
+  });
+
   it("transitions task status", async () => {
     const task = await createTask("Fix the flaky test");
 
@@ -139,5 +149,43 @@ describe("tasks API", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].id).toBe(assignedTask.id);
+  });
+
+  it("filters tasks by status and assignee together", async () => {
+    const user = await createUser("Grace Hopper", "grace.filter@example.com");
+    const doneTask = await createTask("Compile the compiler");
+    const openTask = await createTask("Debug the moth");
+
+    for (const task of [doneTask, openTask]) {
+      await request(app)
+        .post(`/tasks/${task.id}/assign`)
+        .set("x-api-key", API_KEY)
+        .send({ assigneeId: user.id });
+    }
+
+    await request(app)
+      .patch(`/tasks/${doneTask.id}/status`)
+      .set("x-api-key", API_KEY)
+      .send({ status: "done" });
+
+    const res = await request(app)
+      .get(`/tasks?status=done&assigneeId=${user.id}`)
+      .set("x-api-key", API_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({
+      id: doneTask.id,
+      status: "done",
+      assigneeId: user.id,
+    });
+  });
+
+  it("rejects an invalid status filter value", async () => {
+    const res = await request(app).get("/tasks?status=archived").set("x-api-key", API_KEY);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details.fieldErrors.status).toBeDefined();
   });
 });

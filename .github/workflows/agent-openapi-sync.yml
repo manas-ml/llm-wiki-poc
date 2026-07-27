@@ -1,0 +1,291 @@
+# Agent: OpenAPI Sync - iterated skill loop
+#
+# This workflow has two modes:
+# 1. workflow_dispatch: create a fresh agent branch, run the agent, and open a PR.
+# 2. /iterate mode: when a maintainer comments on an agent-created PR, update that PR
+#    and optionally update .github/agent-memory/openapi-sync.md for future runs.
+#
+# Manual only (no schedule): this loop runs when triggered from the Actions tab, or via
+# `gh workflow run agent-openapi-sync.yml`.
+#
+# The /iterate path intentionally checks the PR body marker BEFORE checkout/setup so
+# this workflow can listen for /iterate cheaply without interfering with other agent
+# workflows in this repo.
+
+name: "Agent: OpenAPI Sync"
+
+on:
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: agent-openapi-sync
+  cancel-in-progress: true
+
+jobs:
+  agent-task:
+    # Run all non-comment events. For issue comments, only authorized PR comments
+    # starting with /iterate are allowed to reach the marker preflight below.
+    if: |
+      github.event_name != 'issue_comment' ||
+      (
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/iterate') &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check open-PR bound and iterate marker
+        id: agent_gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_URL: ${{ github.event.issue.pull_request.url }}
+          WORKFLOW_ID: agent-openapi-sync
+          AGENT_LABEL: agent-openapi-sync
+        run: |
+          # Scheduled runs would no-op when an open PR already exists for this agent.
+          # There is no schedule trigger today, but this keeps the workflow ready if one
+          # is added later. Manual workflow_dispatch always bypasses this bound.
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            EXISTING_PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$AGENT_LABEL" --json number,url --limit 1)
+            if [ "$(echo "$EXISTING_PR" | jq 'length')" -gt 0 ]; then
+              echo "run_agent=false" >> "$GITHUB_OUTPUT"
+              echo "Open PR already exists for $AGENT_LABEL; no-op."
+              exit 0
+            fi
+          fi
+
+          # Manual dispatch is a normal agent run.
+          if [ "$EVENT_NAME" != "issue_comment" ]; then
+            echo "run_agent=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # /iterate comments are shared by all recurring agent workflows in this repo. The
+          # hidden PR body marker deterministically routes the comment to the workflow that
+          # originally opened the PR. Non-matching workflows exit before checkout/setup.
+          PR_DATA=$(gh api "$PR_URL")
+          BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+          if grep -Fq "<!-- agent-loop:workflow=$WORKFLOW_ID;" <<< "$BODY"; then
+            echo "run_agent=true" >> "$GITHUB_OUTPUT"
+            echo "number=$(echo "$PR_DATA" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+            echo "head_ref=$(echo "$PR_DATA" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(echo "$PR_DATA" | jq -r '.head.sha')" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_agent=false" >> "$GITHUB_OUTPUT"
+            echo "PR was not created by $WORKFLOW_ID; no-op."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.agent_gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        if: steps.agent_gate.outputs.run_agent == 'true' && github.event_name == 'issue_comment'
+        with:
+          # Iteration updates the existing agent PR branch rather than creating a new one.
+          ref: ${{ steps.agent_gate.outputs.head_ref }}
+          fetch-depth: 0
+
+      - name: Configure git user & branch
+        if: steps.agent_gate.outputs.run_agent == 'true'
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "issue_comment" ]; then
+            BRANCH="agent/openapi-sync/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+            # Record the base commit before branching off, since the default branch
+            # in this repo is not named "main" (diffing against it directly would fail).
+            echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+            git checkout -b "$BRANCH"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Node.js
+        if: steps.agent_gate.outputs.run_agent == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: steps.agent_gate.outputs.run_agent == 'true'
+        run: npm ci
+
+      - name: Install Claude Code
+        if: steps.agent_gate.outputs.run_agent == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run coding agent
+        if: steps.agent_gate.outputs.run_agent == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_COLOR: "3"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.agent_gate.outputs.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -o pipefail
+
+          MEMORY_CONTENT="$(cat .github/agent-memory/openapi-sync.md)"
+
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            # Build an iteration-specific prompt from PR body, comments, review comments,
+            # the triggering /iterate feedback, and the current workflow memory file.
+            npx tsx .github/scripts/agent-iteration.ts \
+              --command prompt \
+              --workflow agent-openapi-sync \
+              --memory .github/agent-memory/openapi-sync.md \
+              --repo "$GITHUB_REPOSITORY" \
+              --pr-number "$PR_NUMBER" \
+              --comment-body "$COMMENT_BODY" > /tmp/agent-prompt.md
+
+            claude -p "$(cat /tmp/agent-prompt.md)" \
+              --permission-mode bypassPermissions \
+              --output-format stream-json \
+              --verbose \
+              2>&1 | tee /tmp/agent-output.txt
+
+            cat /tmp/agent-output.txt \
+              | grep '^{' \
+              | jq -s '[.[] | select(.type == "assistant" and .message.content)] | last | .message.content[] | select(.type == "text") | .text' -r \
+              > /tmp/pr-body.md
+            exit 0
+          fi
+
+          PROMPT="$(cat <<EOF
+          # Context
+
+          You are fixing drift between \`openapi.json\` and the live Express routes + Zod
+          schemas in \`src/modules/**\` for TaskFlow (a small Express + TypeScript REST API) in
+          this repository. Begin by using the \`openapi-sync\` skill.
+
+          # Scope
+
+          Focus only on \`openapi.json\`. You may not modify anything under \`src/**\`.
+
+          You may read all of \`src/**\`, \`openwiki/**\`, and \`CLAUDE.md\` to understand
+          intended behavior and existing invariants, but you must not modify anything outside
+          \`openapi.json\`.
+
+          # Instructions
+
+          1. Run \`npm run check:openapi -- --json\` to get the current findings (see the
+             \`openapi-sync\` skill for what each finding kind means).
+          2. Pick 3-5 of the highest-severity findings for this run — enough to be reviewable,
+             not a full spec rewrite.
+          3. For each finding, read the real route/controller/schema code in
+             \`src/modules/**\` to confirm it before editing \`openapi.json\`.
+          4. Edit only \`openapi.json\`, following its existing conventions (operationId naming,
+             \`\$ref\`-based request schemas, security placement).
+          5. Validate with the commands below.
+          6. Commit and push your changes.
+
+          ## Validation Commands
+
+          \`\`\`bash
+          npm run typecheck
+          npm test
+          npm run check:openapi
+          \`\`\`
+
+          The last command must report zero findings for anything you claimed to fix.
+
+          ## Important Rules
+
+          - Never modify any file under \`src/**\`.
+          - Never run \`npm run check:openapi -- --write\` — fix findings by hand so the diff
+            stays reviewable.
+          - You are running in a CI runner. Do not stop and ask for approval or feedback.
+
+          ## Agent Memory
+
+          $MEMORY_CONTENT
+
+          ## Finishing Up
+
+          When you are finished:
+
+          1. Make sure \`npm run typecheck\`, \`npm test\`, and \`npm run check:openapi\` all
+             pass (the last one showing only deliberately deferred findings, if any).
+          2. Commit and push your changes.
+          3. Answer with the output format below.
+
+          ## Output Format
+
+          Read \`.agents/skills/openapi-sync/references/response-template.md\` and format your
+          final answer accordingly.
+          EOF
+          )"
+
+          claude -p "$PROMPT" \
+            --permission-mode bypassPermissions \
+            --output-format stream-json \
+            --verbose \
+            2>&1 | tee /tmp/agent-output.txt
+
+      - name: Extract PR body
+        if: steps.agent_gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        run: |
+          cat /tmp/agent-output.txt \
+            | grep '^{' \
+            | jq -s '[.[] | select(.type == "assistant" and .message.content)] | last | .message.content[] | select(.type == "text") | .text' -r \
+            > /tmp/pr-body.md
+
+      - name: Push and create PR
+        if: steps.agent_gate.outputs.run_agent == 'true' && github.event_name != 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_LABEL: agent-openapi-sync
+          WORKFLOW_ID: agent-openapi-sync
+        run: |
+          if git diff --quiet "$BASE_SHA" HEAD; then
+            echo "No commits were created by the agent; skipping PR creation."
+            exit 0
+          fi
+
+          git push --set-upstream origin "${{ env.BRANCH }}"
+
+          # Add the hidden workflow marker to the PR body for /iterate routing.
+          npx tsx .github/scripts/agent-iteration.ts \
+            --command footer \
+            --workflow "$WORKFLOW_ID" \
+            --memory .github/agent-memory/openapi-sync.md >> /tmp/pr-body.md
+
+          gh label create "$AGENT_LABEL" --description "Recurring OpenAPI Sync agent PR" --color "1D76DB" || true
+          PR_URL=$(gh pr create --title "[$(date +%m/%d)][Agent: OpenAPI Sync] Sync openapi.json with routes/schemas" --body-file /tmp/pr-body.md)
+          gh pr edit "$PR_URL" --add-label "$AGENT_LABEL"
+
+      - name: Push iteration changes and comment
+        if: steps.agent_gate.outputs.run_agent == 'true' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! git diff --quiet HEAD; then
+            git add -A
+            git commit -m "chore: iterate openapi-sync agent feedback"
+            git push origin HEAD:${{ steps.agent_gate.outputs.head_ref }}
+          fi
+
+          gh pr comment ${{ steps.agent_gate.outputs.number }} --body-file /tmp/pr-body.md
+
+      - name: Upload agent output
+        if: always() && steps.agent_gate.outputs.run_agent == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-output
+          path: /tmp/agent-output.txt

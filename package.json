@@ -13,6 +13,7 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "check:openapi": "tsx scripts/check-openapi-sync.ts",
     "wiki:setup": "node scripts/init-openwiki.mjs",
     "wiki": "openwiki code",
     "wiki:init": "openwiki code --init",
@@ -30,6 +31,7 @@
     "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

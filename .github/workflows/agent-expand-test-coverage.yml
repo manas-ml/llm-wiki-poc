@@ -105,6 +105,9 @@ jobs:
           if [ "${{ github.event_name }}" != "issue_comment" ]; then
             BRANCH="agent/expand-test-coverage/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+            # Record the base commit before branching off, since the default branch
+            # in this repo is not named "main" (diffing against it directly would fail).
+            echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
             git checkout -b "$BRANCH"
           fi
 
@@ -248,7 +251,7 @@ jobs:
           AGENT_LABEL: agent-expand-test-coverage
           WORKFLOW_ID: agent-expand-test-coverage
         run: |
-          if git diff --quiet origin/main...HEAD; then
+          if git diff --quiet "$BASE_SHA" HEAD; then
             echo "No commits were created by the agent; skipping PR creation."
             exit 0
           fi
